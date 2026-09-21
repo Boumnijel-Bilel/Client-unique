@@ -18,6 +18,9 @@ Le script `main.py` :
    4. `phone` normalisé (si non partagé par plus de 15 fiches)
 7. Attribue à chaque cluster un identifiant `CG_XXXXXX` (réutilise l'existant si déjà connu, sinon incrémente le dernier numéro utilisé).
 8. Insère/met à jour les résultats dans la table `client_unique` par lots (`INSERT ... ON DUPLICATE KEY UPDATE`).
+9. Enregistre dans `client_unique_audit` le critère (`AUTHENTICATOR_ID`, `PROFIL_URSSAF_ID`, `EMAIL`, `PHONE` ou `ISOLE`) et la valeur ayant justifié le rapprochement de chaque fiche.
+
+Comme `client_unique_id` est **stable dans le temps** (jamais réattribué), un rapprochement peut rester valide même si la fiche qui l'a justifié est ensuite supprimée ou modifiée. La table `client_unique_audit` permet de retrouver a posteriori pourquoi deux fiches ont été fusionnées, sans dépendre des données actuelles.
 
 Le fichier `check_client_unique.sql` permet de rejouer manuellement la logique de clustering pour un `client_unique_id` donné et de vérifier le critère de détection retenu pour chaque fiche.
 

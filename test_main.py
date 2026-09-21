@@ -147,6 +147,47 @@ class TestBuildClusters(unittest.TestCase):
         # Le téléphone est partagé par trop de fiches -> chaque fiche reste isolée
         self.assertEqual(len(clusters), len(clients))
 
+    def test_client_data_records_critere_and_valeur_for_audit(self):
+        clients = [
+            self._client(1, authenticator_id="AUTH1"),
+            self._client(2, email_address="foo@bar.com"),
+            self._client(3, phone="0612345678"),
+            self._client(4),
+        ]
+        phone_counts, email_counts = main.compute_frequency_counts(clients)
+        _, client_data = main.build_clusters(clients, phone_counts, email_counts)
+
+        self.assertEqual(client_data[1]["critere"], "AUTHENTICATOR_ID")
+        self.assertEqual(client_data[1]["valeur"], "AUTH1")
+        self.assertEqual(client_data[2]["critere"], "EMAIL")
+        self.assertEqual(client_data[2]["valeur"], "foo@bar.com")
+        self.assertEqual(client_data[3]["critere"], "PHONE")
+        self.assertEqual(client_data[3]["valeur"], "0612345678")
+        self.assertEqual(client_data[4]["critere"], "ISOLE")
+        self.assertIsNone(client_data[4]["valeur"])
+
+
+class TestAssignUniqueIds(unittest.TestCase):
+    def test_assign_unique_ids_reuses_existing_and_emits_audit_records(self):
+        clusters = {"root1": [1, 2], "root2": [3]}
+        client_data = {
+            1: {"client_id": 1, "user_id": 10, "critere": "EMAIL", "valeur": "foo@bar.com"},
+            2: {"client_id": 2, "user_id": None, "critere": "EMAIL", "valeur": "foo@bar.com"},
+            3: {"client_id": 3, "user_id": None, "critere": "ISOLE", "valeur": None},
+        }
+        existing_mapping = {1: "CG_000005"}
+
+        records, audit_records = main.assign_unique_ids(clusters, client_data, existing_mapping, max_cg_num=5)
+
+        # Le cluster déjà connu réutilise son ID existant pour toutes ses fiches
+        self.assertIn(("CG_000005", 1, 10), records)
+        self.assertIn(("CG_000005", 2, None), records)
+        # Le nouveau cluster obtient un ID incrémenté à partir de max_cg_num
+        self.assertIn(("CG_000006", 3, None), records)
+
+        self.assertIn((1, "CG_000005", "EMAIL", "foo@bar.com"), audit_records)
+        self.assertIn((3, "CG_000006", "ISOLE", None), audit_records)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -191,6 +191,27 @@ def ensure_output_table(cursor):
         )
 
 
+def ensure_audit_table(cursor):
+    """Table conservant le critère/la valeur ayant justifié le rapprochement de chaque fiche,
+    pour pouvoir l'expliquer même si la fiche source est supprimée ou modifiée par la suite."""
+    cursor.execute("SHOW TABLES LIKE 'client_unique_audit'")
+    if cursor.fetchone() is None:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS client_unique_audit (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                client_id INT NOT NULL UNIQUE,
+                client_unique_id VARCHAR(32) NOT NULL,
+                critere VARCHAR(20) NOT NULL,
+                valeur VARCHAR(255) NULL,
+                date_creation DATETIME DEFAULT CURRENT_TIMESTAMP,
+                date_modification DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_audit_client_unique_id (client_unique_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """
+        )
+
+
 class UnionFind:
     def __init__(self):
         self.parent = {}
@@ -286,23 +307,30 @@ def build_clusters(clients, phone_counts, email_counts):
         effective_user_str = raw_user_id or auth
         user_id = int(effective_user_str) if effective_user_str and effective_user_str.isdigit() else None
 
-        client_data[cid] = {"client_id": cid, "user_id": user_id}
-
         fiche_node = ("CLIENT", cid)
         uf.find(fiche_node)
 
         # 1. authenticator_id en priorité (user_id exclu du clustering)
         if auth:
             uf.union(fiche_node, ("AUTH", auth))
+            critere, valeur = "AUTHENTICATOR_ID", auth
         # 2. sinon profil_urssaf_id
         elif urssaf:
             uf.union(fiche_node, ("URSSAF", urssaf))
+            critere, valeur = "PROFIL_URSSAF_ID", urssaf
         # 3. sinon email_address
         elif email and email_counts[email] <= SHARED_THRESHOLD:
             uf.union(fiche_node, ("EMAIL", email))
+            critere, valeur = "EMAIL", email
         # 4. sinon phone
         elif phone and phone_counts[phone] <= SHARED_THRESHOLD:
             uf.union(fiche_node, ("PHONE", phone))
+            critere, valeur = "PHONE", phone
+        else:
+            critere, valeur = "ISOLE", None
+
+        # critere/valeur : conservés pour l'audit, figés au moment du rapprochement
+        client_data[cid] = {"client_id": cid, "user_id": user_id, "critere": critere, "valeur": valeur}
 
     clusters = {}
     for cid in client_data:
@@ -315,6 +343,7 @@ def build_clusters(clients, phone_counts, email_counts):
 def assign_unique_ids(clusters, client_data, existing_mapping, max_cg_num):
     """Attribue un client_unique_id stable à chaque cluster (réutilise l'existant si déjà connu)."""
     records = []
+    audit_records = []
     next_cg_num = max_cg_num
 
     for fiches in clusters.values():
@@ -328,8 +357,9 @@ def assign_unique_ids(clusters, client_data, existing_mapping, max_cg_num):
 
         for fid in fiches:
             records.append((assigned_cg, fid, client_data[fid]["user_id"]))
+            audit_records.append((fid, assigned_cg, client_data[fid]["critere"], client_data[fid]["valeur"]))
 
-    return records
+    return records, audit_records
 
 
 def save_records(cursor, conn, records):
@@ -355,6 +385,26 @@ def save_records(cursor, conn, records):
         logger.info("Progression : %s/%s fiches enregistrées (%.1f%%)", current, total_records, pct)
 
 
+def save_audit(cursor, conn, audit_records):
+    """Enregistre par lots le critère/la valeur ayant justifié chaque rapprochement."""
+    total_records = len(audit_records)
+
+    for i in range(0, total_records, BATCH_SIZE):
+        batch = audit_records[i : i + BATCH_SIZE]
+        placeholders = ", ".join(["(%s, %s, %s, %s)"] * len(batch))
+        upsert_query = f"""
+            INSERT INTO client_unique_audit (client_id, client_unique_id, critere, valeur)
+            VALUES {placeholders}
+            ON DUPLICATE KEY UPDATE
+                client_unique_id = VALUES(client_unique_id),
+                critere = VALUES(critere),
+                valeur = VALUES(valeur)
+        """
+        flat_params = [item for row in batch for item in row]
+        cursor.execute(upsert_query, flat_params)
+        conn.commit()
+
+
 def main():
     logger.info("[1/5] Connexion à la base de données MySQL...")
     conn = create_connection()
@@ -363,6 +413,7 @@ def main():
 
     try:
         ensure_output_table(write_cursor)
+        ensure_audit_table(write_cursor)
         conn.commit()
 
         logger.info("[2/5] Chargement des clients uniques existants pour garantir la stabilité...")
@@ -382,10 +433,11 @@ def main():
         clusters, client_data = build_clusters(clients, phone_counts, email_counts)
         logger.info("-> %s clients uniques (Golden) identifiés après déduplication.", len(clusters))
 
-        records_to_upsert = assign_unique_ids(clusters, client_data, existing_mapping, max_cg_num)
+        records_to_upsert, audit_records = assign_unique_ids(clusters, client_data, existing_mapping, max_cg_num)
 
         logger.info("[5/5] Sauvegarde ultra-rapide dans la table client_unique...")
         save_records(write_cursor, conn, records_to_upsert)
+        save_audit(write_cursor, conn, audit_records)
 
         logger.info("=== TRAITEMENT TERMINÉ AVEC SUCCÈS ===")
         logger.info("Total fiches dans client_unique : %s", len(records_to_upsert))

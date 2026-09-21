@@ -59,6 +59,14 @@ La configuration se fait via des variables d'environnement, chargées automatiqu
 
 ## Utilisation
 
+Le script suppose que le port local `DB_PORT` (3307 par défaut) est déjà accessible. Ouvrez d'abord le tunnel SSH vers la base de préprod :
+
+```powershell
+ssh -L 3307:mysql-tcp-proxy.accessap-preprod-ops.svc.cluster.local:20184 tunnel@bastion.preprod.acces-sap.net -N
+```
+
+Laissez cette commande active (ou lancez-la en arrière-plan avec `-f`), puis dans un autre terminal :
+
 ```powershell
 python main.py
 ```
